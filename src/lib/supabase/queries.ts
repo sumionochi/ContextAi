@@ -1,0 +1,468 @@
+'use server';
+
+import { and, eq, ilike, notExists } from 'drizzle-orm';
+import {
+  files,
+  folders,
+  users,
+  workspaces,
+} from '../../../migrations/schema';
+import db from './db';
+import {
+  File,
+  Folder,
+  Subscription,
+  User,
+  workspace,
+} from './supabase.types';
+import { revalidatePath } from 'next/cache';
+import { validate } from 'uuid';
+import { collaborators } from './schema';
+
+export const createWorkspace = async (workspace: workspace) => {
+  try {
+    const response = await db.insert(workspaces).values(workspace);
+    console.log(response);
+  } catch (error) {
+    console.log(error);
+  }
+};
+
+export const getFiles = async (folderId: string) => {
+    const isValid = validate(folderId);
+    if (!isValid) {
+      return { data: null, error: 'Error' };
+    }
+  
+    try {
+      const results =
+        ((await db
+          .select()
+          .from(files)
+          .orderBy(files.createdAt)
+          .where(and(eq(files.folderId, folderId)))) as File[]) || [];
+      return { data: results, error: null };
+    } catch (error) {
+      return { data: null, error: 'Error' };
+    }
+  };
+
+export const userSubscriptionStatus = async (userId: string) => {
+    try {
+      const data = await db.query.subscriptions.findFirst({
+        where: (s, { eq }) => eq(s.userId, userId),
+      });
+      if (data) return { data: data as Subscription, error: null };
+      else return { data: null, error: null };
+    } catch (error) {
+      console.log(error);
+      return { data: null, error: 'Error' };
+    }
+  };
+
+  export const getFolders = async (workspaceId: string) => {
+    const isValid = validate(workspaceId);
+    if (!isValid) {
+      return { data: null, error: 'Error' };
+    }
+  
+    try {
+      const results =
+        ((await db
+          .select()
+          .from(folders)
+          .orderBy(folders.createdAt)
+          .where(and(eq(folders.workspaceId, workspaceId)))) as Folder[]) || [];
+  
+      return { data: results, error: null };
+    } catch (error) {
+      return { data: null, error: 'Error' };
+    }
+  };
+
+  export const getPrivateWorkspaces = async (userId: string | null) => {
+    if (!userId) {
+      return [];
+    }
+    const privateWorkspaces = (await db
+      .select({
+        id: workspaces.id,
+        createdAt: workspaces.createdAt,
+        workspaceOwner: workspaces.workspaceOwner,
+        title: workspaces.title,
+        iconId: workspaces.iconId,
+        data: workspaces.data,
+        inTrash: workspaces.inTrash,
+        logo: workspaces.logo,
+      })
+      .from(workspaces)
+      .where(
+        and(
+          notExists(
+            db
+              .select()
+              .from(collaborators)
+              .where(eq(collaborators.workspaceId, workspaces.id))
+          ),
+          eq(workspaces.workspaceOwner, userId)
+        )
+      )) as [workspace];
+    return privateWorkspaces;
+  };  
+
+  export const getCollaboratingWorkspaces = async (userId: string) => {
+    if (!userId) return [];
+    const collaboratedWorkspaces = (await db
+      .select({
+        id: workspaces.id,
+        createdAt: workspaces.createdAt,
+        workspaceOwner: workspaces.workspaceOwner,
+        title: workspaces.title,
+        iconId: workspaces.iconId,
+        data: workspaces.data,
+        inTrash: workspaces.inTrash,
+        logo: workspaces.logo,
+      })
+      .from(users)
+      .innerJoin(collaborators, eq(users.id, collaborators.userId))
+      .innerJoin(workspaces, eq(collaborators.workspaceId, workspaces.id))
+      .where(eq(users.id, userId))) as [workspace];
+    return collaboratedWorkspaces;
+  };
+
+  export const getSharedWorkspaces = async (userId: string) => {
+    if (!userId) return [];
+    const sharedWorkspaces = (await db
+      .selectDistinct({
+        id: workspaces.id,
+        createdAt: workspaces.createdAt,
+        workspaceOwner: workspaces.workspaceOwner,
+        title: workspaces.title,
+        iconId: workspaces.iconId,
+        data: workspaces.data,
+        inTrash: workspaces.inTrash,
+        logo: workspaces.logo,
+      })
+      .from(workspaces)
+      .orderBy(workspaces.createdAt)
+      .innerJoin(collaborators, eq(workspaces.id, collaborators.workspaceId))
+      .where(eq(workspaces.workspaceOwner, userId))) as [workspace];
+    return sharedWorkspaces;
+  };
+
+  export const addCollaborators = async (
+    users: User[],
+    workspaceId: string
+  ) => {
+    const response = users.forEach(async (user: User) => {
+      const userExists = await db.query.collaborators.findFirst({
+        where: (p, { eq }) =>
+          and(eq(p.userId, user.id), eq(p.workspaceId, workspaceId)),
+      });
+      if (!userExists)
+        await db
+          .insert(collaborators)
+          .values({ workspaceId, userId: user.id });
+    });
+  };
+  
+  export const getProfiles = async (
+    email: string,
+    userEmail: string | undefined
+  ) => {
+    if (!email || !userEmail) return [];
+    const accounts = db
+      .select()
+      .from(users)
+      .where(ilike(users.email, `${email}%`));
+    return accounts;
+  };
+
+  export const createFolder = async (folder: Folder) => {
+    const results = await db.insert(folders).values(folder);
+  };
+
+  export const createFile = async (file: File) => {
+    const results = await db.insert(files).values(file);
+  };
+
+  export const sendFileToTrash = async (fileId: string, message: string) => {
+    const response = await db
+      .update(files)
+      .set({ inTrash: message })
+      .where(eq(files.id, fileId));
+  };
+
+  export const sendFolderToTrash = async (folderId: string, message: string) => {
+    const response = await db
+      .update(folders)
+      .set({ inTrash: message })
+      .where(eq(folders.id, folderId));
+  
+    const { data, error } = await getFiles(folderId);
+    if (data)
+      data.map(async (file) => {
+        await db
+          .update(files)
+          .set({
+            inTrash: message,
+          })
+          .where(eq(files.folderId, folderId));
+      });
+  };
+
+  export const updateEmojiFile = async (fileId: string, emoji: string) => {
+    const response = await db
+      .update(files)
+      .set({ iconId: emoji ? emoji : '📋' })
+      .where(eq(files.id, fileId));
+  };
+
+  export const updateEmojiFolder = async (folderId: string, emoji: string) => {
+    const response = await db
+      .update(folders)
+      .set({ iconId: emoji ? emoji : '📁' })
+      .where(eq(folders.id, folderId));
+  };
+
+  export const updateTitleFile = async (fileId: string, title: string) => {
+    const response = await db
+      .update(files)
+      .set({ title })
+      .where(eq(files.id, fileId));
+  };
+
+  export const updateTitleFolder = async (folderId: string, title: string) => {
+    const response = await db
+      .update(folders)
+      .set({ title })
+      .where(eq(folders.id, folderId));
+  };
+
+  export const deleteWorkspace = async (workspaceId: string) => {
+    if (!workspaceId) return;
+    await db.delete(workspaces).where(eq(workspaces.id, workspaceId));
+  };
+
+  export const findProfile = async (userId: string) => {
+    const response = await db.query.users.findFirst({
+      where: (p, { eq }) => eq(p.id, userId),
+    });
+  
+    return response;
+  };
+
+  export const getCollaborators = async (
+    workspaceId: string
+  ): Promise<User[]> => {
+    const response = await db
+      .select()
+      .from(collaborators)
+      .where(eq(collaborators.workspaceId, workspaceId));
+  
+    if (!response.length) return [];
+  
+    const usersInformation: Promise<User | undefined>[] = response.map(
+      async (user) => {
+        const exists = await db.query.users.findFirst({
+          where: (p, { eq }) => eq(p.id, user.userId),
+        });
+        return exists;
+      }
+    );
+  
+    const resolvedUsers = await Promise.all(usersInformation);
+    return resolvedUsers.filter(Boolean) as User[]; 
+  };
+
+  export const removeCollaborators = async (
+    profiles: User[],
+    workspaceId: string
+  ) => {
+    const response = profiles.forEach(async (profile: User) => {
+      const userExists = await db.query.collaborators.findFirst({
+        where: (p, { eq }) =>
+          and(eq(p.userId, profile.id), eq(p.workspaceId, workspaceId)),
+      });
+      if (userExists)
+        await db
+          .delete(collaborators)
+          .where(
+            and(
+              eq(collaborators.workspaceId, workspaceId),
+              eq(collaborators.userId, profile.id)
+            )
+          );
+    });
+  };
+
+  export const updateProfile = async (
+    profile: Partial<User>,
+    userId: string
+  ) => {
+    if (!userId) return;
+    const response = await db
+      .update(users)
+      .set(profile)
+      .where(eq(users.id, userId));
+    return response;
+  };
+
+  export const updateWorkspaceFile = async (
+    workspaceId: string,
+    data: string
+  ) => {
+    const response = await db
+      .update(workspaces)
+      .set({ data })
+      .where(eq(workspaces.id, workspaceId));
+  };
+
+  export const updateWorkspace = async (
+    updatedWorkspace: Partial<workspace>,
+    workspaceId: string
+  ) => {
+    if (!workspaceId) return;
+    await db
+      .update(workspaces)
+      .set(updatedWorkspace)
+      .where(eq(workspaces.id, workspaceId));
+    revalidatePath(`/workspace/${workspaceId}`);
+  };
+
+  export const deleteFile = async (fileId: string) => {
+    if (!fileId) return;
+    await db.delete(files).where(eq(files.id, fileId));
+  };
+
+  export const deleteFolder = async (folderId: string) => {
+    if (!folderId) return;
+    await db.delete(folders).where(eq(folders.id, folderId));
+  };
+
+  export const getFileDetails = async (fileId: string) => {
+    const isValid = validate(fileId);
+    if (!isValid) {
+      data: [];
+      error: 'Error';
+    }
+    try {
+      const response = (await db
+        .select()
+        .from(files)
+        .where(eq(files.id, fileId))
+        .limit(1)) as File[];
+      return { data: response, error: null };
+    } catch (error) {
+      return { data: [], error: 'Error' };
+    }
+  };
+
+  export const getFolderDetails = async (folderId: string) => {
+    const isValid = validate(folderId);
+    if (!isValid) {
+      data: [];
+      error: 'Error';
+    }
+  
+    try {
+      const response = (await db
+        .select()
+        .from(folders)
+        .where(eq(folders.id, folderId))
+        .limit(1)) as Folder[];
+  
+      return { data: response, error: null };
+    } catch (error) {
+      return { data: [], error: 'Error' };
+    }
+  };
+
+  export const getWorkspaceDetails = async (workspaceId: string) => {
+    const isValid = validate(workspaceId);
+    if (!isValid) {
+      data: [];
+      error: 'Error';
+    }
+  
+    try {
+      const response = (await db
+        .select()
+        .from(workspaces)
+        .where(eq(workspaces.id, workspaceId))
+        .limit(1)) as workspace[];
+  
+      return { data: response, error: null };
+    } catch (error) {
+      return { data: [], error: 'Error' };
+    }
+  };
+
+  export const restoreFile = async (fileId: string) => {
+    const response = await db
+      .update(files)
+      .set({ inTrash: '' })
+      .where(eq(files.id, fileId));
+  };
+
+  export const restoreFolder = async (folderId: string) => {
+    const response = await db
+      .update(folders)
+      .set({ inTrash: '' })
+      .where(eq(folders.id, folderId));
+    const { data, error } = await getFiles(folderId);
+    if (data)
+      data.map(async (file) => {
+        await db
+          .update(files)
+          .set({ inTrash: '' })
+          .where(eq(files.folderId, folderId));
+      });
+  };
+
+  export const updateEmojiWorkspace = async (
+    workspaceId: string,
+    emoji: string
+  ) => {
+    try {
+      const response = await db
+        .update(workspaces)
+        .set({ iconId: emoji ? emoji : '📁' })
+        .where(eq(workspaces.id, workspaceId));
+    } catch (er) {
+      revalidatePath('/');
+    }
+  };
+
+  export const updateFileFile = async (fileId: string, data: string) => {
+    const response = await db
+      .update(files)
+      .set({ data })
+      .where(eq(files.id, fileId));
+  };
+
+  export const updateFile = async (
+    updatedFile: Partial<File>,
+    fileId: string
+  ) => {
+    if (!fileId) return;
+    await db.update(files).set(updatedFile).where(eq(files.id, fileId));
+  };
+
+  export const updateFolder = async (
+    updatedFolder: Partial<Folder>,
+    folderId: string
+  ) => {
+    if (!folderId) return;
+    await db
+      .update(folders)
+      .set(updatedFolder)
+      .where(eq(folders.id, folderId));
+  };
+
+  export const updateFolderFile = async (folderId: string, data: string) => {
+    const response = await db
+      .update(folders)
+      .set({ data })
+      .where(eq(folders.id, folderId));
+  };
